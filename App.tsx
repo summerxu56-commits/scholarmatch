@@ -30,9 +30,21 @@ const App: React.FC = () => {
         hasSearched: true,
       });
     } catch (error: any) {
+      console.error("Search failed:", error);
+      let errorMessage = "An unexpected error occurred while fetching data.";
+      
+      // Handle typical Gemini API error structures
+      if (error.message) {
+        if (error.message.includes("429") || error.message.includes("quota")) {
+          errorMessage = "Usage limit exceeded. Please wait a moment and try again.";
+        } else {
+          errorMessage = error.message;
+        }
+      }
+
       setState({
         loading: false,
-        error: error.message || "An unexpected error occurred while fetching data.",
+        error: errorMessage,
         results: [],
         hasSearched: true,
       });
@@ -64,6 +76,9 @@ const App: React.FC = () => {
               <AlertCircle className="w-10 h-10 text-red-500 mx-auto mb-3" />
               <h3 className="text-lg font-medium text-red-800 mb-1">Search Failed</h3>
               <p className="text-red-600">{state.error}</p>
+              {state.error.includes("limit") && (
+                <p className="text-sm text-red-500 mt-2">Tip: Try searching for fewer keywords or try again in 30 seconds.</p>
+              )}
             </div>
           )}
 
@@ -97,7 +112,7 @@ const App: React.FC = () => {
 
       <footer className="bg-white border-t border-slate-200 py-8 mt-12">
         <div className="container mx-auto px-4 text-center text-slate-500 text-sm">
-          <p>© {new Date().getFullYear()} ScholarMatch AI. Powered by Gemini 3.</p>
+          <p>© {new Date().getFullYear()} ScholarMatch AI. Powered by Gemini.</p>
         </div>
       </footer>
     </div>
