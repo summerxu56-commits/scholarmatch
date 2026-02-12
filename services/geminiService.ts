@@ -3,84 +3,91 @@ import { Professor, SearchFilters } from "../types";
 
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
+// Helper function to wait
+const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
 export const searchProfessors = async (keywords: string[], filters: SearchFilters): Promise<Professor[]> => {
-  // Use 2.0 Flash as it is more stable for quotas than 3-preview
   const modelId = "gemini-2.0-flash";
   
   const keywordsString = keywords.join(", ");
   const rankingContext = filters.rankingRange || "Top 50";
-  const departmentContext = filters.department || "relevant departments (e.g., Computer Science, Engineering)";
+  const departmentContext = filters.department || "relevant departments";
   
-  // Reduced quantity from 20 to 8 to prevent "429 Resource Exhausted" errors
+  // OPTIMIZATION: Reduced count to 5 and requested concise outputs to save tokens and avoid 429 errors
   const prompt = `
-    I am a prospective PhD student looking for a supervisor in the US.
+    Find 5 distinct professors in the US matching these criteria:
+    1. Interests: ${keywordsString}.
+    2. Ranking: ${rankingContext}.
+    3. Dept: ${departmentContext}.
     
-    SEARCH CRITERIA:
-    1. Research Interests: ${keywordsString}.
-    2. University Ranking: US News National University Ranking - ${rankingContext}.
-    3. Department: ${departmentContext}.
-    4. Quantity: Find 8 distinct professors (Reduced count for speed and stability).
+    Calculate "matchScore" (0-100) based on relevance to keywords.
     
-    MATCHING SCORE ALGORITHM:
-    Calculate a "matchScore" (0-100) for each professor based on:
-    - **Relevance (60%)**: How directly do their core research interests map to ${keywordsString}?
-    - **Recency (20%)**: Do they have publications in these specific areas since 2021?
-    - **Focus (20%)**: Is this their primary research area or just a side topic?
-    
-    OUTPUT REQUIREMENTS:
-    For each professor, provide:
-    1. Full Name
-    2. University and Department
-    3. Match Score (0-100) based on the algorithm above.
-    4. Match Reason: A short sentence explaining the score.
-    5. Website URL: Direct link to lab or faculty profile (if known, otherwise estimate).
-    6. Research Interests: List of 3-4 specific topics.
-    7. Summary: 2 sentences on their specific work.
-    
-    CRITICAL: Output the result strictly as a JSON array. 
-    The JSON objects must have these exact keys: "name", "university", "department", "matchScore" (number), "matchReason" (string), "websiteUrl", "researchInterests" (array of strings), "summary".
+    Output strictly as a JSON array. Keys: 
+    - "name"
+    - "university" 
+    - "department"
+    - "matchScore" (number)
+    - "matchReason" (Max 10 words)
+    - "websiteUrl"
+    - "researchInterests" (Array of 3 strings)
+    - "summary" (Max 15 words)
   `;
 
-  try {
-    const response = await ai.models.generateContent({
-      model: modelId,
-      contents: prompt,
-      config: {
-        responseMimeType: "application/json", 
-        tools: [{ googleSearch: {} }],
-      },
-    });
+  let lastError;
+  const maxRetries = 3;
 
-    const text = response.text || "";
-    
-    let jsonString = text;
-    const jsonMatch = text.match(/```json\n([\s\S]*?)\n```/) || text.match(/```([\s\S]*?)```/);
-    if (jsonMatch && jsonMatch[1]) {
-      jsonString = jsonMatch[1];
-    }
-
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
+      const response = await ai.models.generateContent({
+        model: modelId,
+        contents: prompt,
+        config: {
+          responseMimeType: "application/json", 
+          tools: [{ googleSearch: {} }],
+        },
+      });
+
+      const text = response.text || "";
+      let jsonString = text;
+      
+      // Clean up markdown if present
+      const jsonMatch = text.match(/```json\n([\s\S]*?)\n```/) || text.match(/```([\s\S]*?)```/);
+      if (jsonMatch && jsonMatch[1]) {
+        jsonString = jsonMatch[1];
+      }
+
       const data = JSON.parse(jsonString);
       const professorsList = Array.isArray(data) ? data : (data as any).professors || [];
 
       return professorsList.map((prof: any, index: number) => ({
         ...prof,
         id: `prof-${index}-${Date.now()}`,
-        matchReason: prof.matchReason || "Matched based on research keywords.",
+        matchReason: prof.matchReason || "Matched based on keywords.",
         researchInterests: Array.isArray(prof.researchInterests) ? prof.researchInterests : [],
       }));
-    } catch (parseError) {
-      console.error("JSON Parse Error:", parseError);
-      throw new Error("Failed to parse professor data.");
+
+    } catch (error: any) {
+      lastError = error;
+      const isQuotaError = error.status === 429 || error.code === 429 || (error.message && error.message.includes("quota"));
+      
+      if (isQuotaError && attempt < maxRetries - 1) {
+        // Exponential backoff: Wait 2s, then 4s, then stop
+        const waitTime = 2000 * Math.pow(2, attempt);
+        console.warn(`Attempt ${attempt + 1} failed with quota error. Retrying in ${waitTime}ms...`);
+        await delay(waitTime);
+        continue;
+      }
+      
+      // If it's not a quota error, or we ran out of retries, break loop
+      break;
     }
-  } catch (error: any) {
-    console.error("Gemini API Error:", error);
-    
-    // Check specifically for 429 or Quota Exceeded
-    if (error.status === 429 || error.code === 429 || (error.message && error.message.includes("quota"))) {
-      throw new Error("API Quota Exceeded. The system is busy. Please try searching for fewer keywords or wait a minute before trying again.");
-    }
-    
-    throw error;
   }
+
+  // If we get here, all retries failed
+  console.error("Gemini API Error after retries:", lastError);
+  if (lastError && (lastError.status === 429 || lastError.code === 429 || (lastError.message && lastError.message.includes("quota")))) {
+    throw new Error("Server is busy (Quota Exceeded). Please try searching for fewer keywords or try again in 1 minute.");
+  }
+  
+  throw new Error("Failed to fetch professor data.");
 };
