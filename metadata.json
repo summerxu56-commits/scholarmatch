@@ -1,0 +1,5 @@
+{
+  "name": "ScholarMatch AI",
+  "description": "An AI-powered assistant to help PhD applicants find matching professors in top US universities based on research interests.",
+  "requestFramePermissions": []
+}
