@@ -3,91 +3,77 @@ import { Professor, SearchFilters } from "../types";
 
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
-// Helper function to wait
-const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-
 export const searchProfessors = async (keywords: string[], filters: SearchFilters): Promise<Professor[]> => {
-  const modelId = "gemini-2.0-flash";
+  const modelId = "gemini-3-pro-preview";
   
   const keywordsString = keywords.join(", ");
   const rankingContext = filters.rankingRange || "Top 50";
-  const departmentContext = filters.department || "relevant departments";
+  const departmentContext = filters.department || "relevant departments (e.g., Computer Science, Engineering)";
   
-  // OPTIMIZATION: Reduced count to 5 and requested concise outputs to save tokens and avoid 429 errors
   const prompt = `
-    Find 5 distinct professors in the US matching these criteria:
-    1. Interests: ${keywordsString}.
-    2. Ranking: ${rankingContext}.
-    3. Dept: ${departmentContext}.
+    I am a prospective PhD student looking for a supervisor in the US.
     
-    Calculate "matchScore" (0-100) based on relevance to keywords.
+    SEARCH CRITERIA:
+    1. Research Interests: ${keywordsString}.
+    2. University Ranking: US News National University Ranking - ${rankingContext}.
+    3. Department: ${departmentContext}.
+    4. Quantity: Find at least 20 distinct professors.
     
-    Output strictly as a JSON array. Keys: 
-    - "name"
-    - "university" 
-    - "department"
-    - "matchScore" (number)
-    - "matchReason" (Max 10 words)
-    - "websiteUrl"
-    - "researchInterests" (Array of 3 strings)
-    - "summary" (Max 15 words)
+    MATCHING SCORE ALGORITHM:
+    Calculate a "matchScore" (0-100) for each professor based on:
+    - **Relevance (60%)**: How directly do their core research interests map to ${keywordsString}?
+    - **Recency (20%)**: Do they have publications in these specific areas since 2021?
+    - **Focus (20%)**: Is this their primary research area or just a side topic?
+    
+    OUTPUT REQUIREMENTS:
+    For each professor, provide:
+    1. Full Name
+    2. University and Department
+    3. Match Score (0-100) based on the algorithm above.
+    4. Match Reason: A short sentence explaining the score (e.g., "High match due to recent CVPR 2023 papers on transformers").
+    5. Website URL: Direct link to lab or faculty profile.
+    6. Research Interests: List of 3-4 specific topics.
+    7. Summary: 2 sentences on their specific work.
+    
+    CRITICAL: Output the result strictly as a JSON array inside a markdown code block \`\`\`json ... \`\`\`. 
+    The JSON objects must have these exact keys: "name", "university", "department", "matchScore" (number), "matchReason" (string), "websiteUrl", "researchInterests" (array of strings), "summary".
   `;
 
-  let lastError;
-  const maxRetries = 3;
+  try {
+    const response = await ai.models.generateContent({
+      model: modelId,
+      contents: prompt,
+      config: {
+        tools: [{ googleSearch: {} }],
+      },
+    });
 
-  for (let attempt = 0; attempt < maxRetries; attempt++) {
-    try {
-      const response = await ai.models.generateContent({
-        model: modelId,
-        contents: prompt,
-        config: {
-          responseMimeType: "application/json", 
-          tools: [{ googleSearch: {} }],
-        },
-      });
-
-      const text = response.text || "";
-      let jsonString = text;
-      
-      // Clean up markdown if present
-      const jsonMatch = text.match(/```json\n([\s\S]*?)\n```/) || text.match(/```([\s\S]*?)```/);
-      if (jsonMatch && jsonMatch[1]) {
-        jsonString = jsonMatch[1];
+    const text = response.text || "";
+    
+    // Extract JSON from markdown code block
+    const jsonMatch = text.match(/```json\n([\s\S]*?)\n```/) || text.match(/```([\s\S]*?)```/);
+    
+    if (jsonMatch && jsonMatch[1]) {
+      try {
+        const data = JSON.parse(jsonMatch[1]);
+        // Add random IDs if not present and ensure fields exist
+        return data.map((prof: any, index: number) => ({
+          ...prof,
+          id: `prof-${index}-${Date.now()}`,
+          matchReason: prof.matchReason || "Matched based on research keywords.",
+          researchInterests: Array.isArray(prof.researchInterests) ? prof.researchInterests : [],
+        }));
+      } catch (parseError) {
+        console.error("JSON Parse Error:", parseError);
+        console.log("Raw Text:", text);
+        throw new Error("Failed to parse professor data from AI response.");
       }
-
-      const data = JSON.parse(jsonString);
-      const professorsList = Array.isArray(data) ? data : (data as any).professors || [];
-
-      return professorsList.map((prof: any, index: number) => ({
-        ...prof,
-        id: `prof-${index}-${Date.now()}`,
-        matchReason: prof.matchReason || "Matched based on keywords.",
-        researchInterests: Array.isArray(prof.researchInterests) ? prof.researchInterests : [],
-      }));
-
-    } catch (error: any) {
-      lastError = error;
-      const isQuotaError = error.status === 429 || error.code === 429 || (error.message && error.message.includes("quota"));
-      
-      if (isQuotaError && attempt < maxRetries - 1) {
-        // Exponential backoff: Wait 2s, then 4s, then stop
-        const waitTime = 2000 * Math.pow(2, attempt);
-        console.warn(`Attempt ${attempt + 1} failed with quota error. Retrying in ${waitTime}ms...`);
-        await delay(waitTime);
-        continue;
-      }
-      
-      // If it's not a quota error, or we ran out of retries, break loop
-      break;
+    } else {
+      console.warn("No JSON code block found in response.");
+      throw new Error("AI did not return the expected format. Please try again.");
     }
+  } catch (error) {
+    console.error("Gemini API Error:", error);
+    throw error;
   }
-
-  // If we get here, all retries failed
-  console.error("Gemini API Error after retries:", lastError);
-  if (lastError && (lastError.status === 429 || lastError.code === 429 || (lastError.message && lastError.message.includes("quota")))) {
-    throw new Error("Server is busy (Quota Exceeded). Please try searching for fewer keywords or try again in 1 minute.");
-  }
-  
-  throw new Error("Failed to fetch professor data.");
 };
