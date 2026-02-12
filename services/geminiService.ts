@@ -4,7 +4,8 @@ import { Professor, SearchFilters } from "../types";
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
 export const searchProfessors = async (keywords: string[], filters: SearchFilters): Promise<Professor[]> => {
-  const modelId = "gemini-3-pro-preview";
+  // Use Flash model: Faster, newer, and much higher free tier limits than Pro
+  const modelId = "gemini-3-flash-preview";
   
   const keywordsString = keywords.join(", ");
   const rankingContext = filters.rankingRange || "Top 50";
@@ -44,33 +45,38 @@ export const searchProfessors = async (keywords: string[], filters: SearchFilter
       model: modelId,
       contents: prompt,
       config: {
+        responseMimeType: "application/json", // Helps ensure valid JSON format
         tools: [{ googleSearch: {} }],
       },
     });
 
     const text = response.text || "";
     
-    // Extract JSON from markdown code block
+    // Extract JSON from markdown code block or raw text
+    // Sometimes responseMimeType makes it raw JSON, sometimes it still wraps in markdown
+    let jsonString = text;
     const jsonMatch = text.match(/```json\n([\s\S]*?)\n```/) || text.match(/```([\s\S]*?)```/);
-    
     if (jsonMatch && jsonMatch[1]) {
-      try {
-        const data = JSON.parse(jsonMatch[1]);
-        // Add random IDs if not present and ensure fields exist
-        return data.map((prof: any, index: number) => ({
-          ...prof,
-          id: `prof-${index}-${Date.now()}`,
-          matchReason: prof.matchReason || "Matched based on research keywords.",
-          researchInterests: Array.isArray(prof.researchInterests) ? prof.researchInterests : [],
-        }));
-      } catch (parseError) {
-        console.error("JSON Parse Error:", parseError);
-        console.log("Raw Text:", text);
-        throw new Error("Failed to parse professor data from AI response.");
-      }
-    } else {
-      console.warn("No JSON code block found in response.");
-      throw new Error("AI did not return the expected format. Please try again.");
+      jsonString = jsonMatch[1];
+    }
+
+    try {
+      const data = JSON.parse(jsonString);
+      
+      // Ensure data is an array
+      const professorsList = Array.isArray(data) ? data : (data as any).professors || [];
+
+      // Add random IDs if not present and ensure fields exist
+      return professorsList.map((prof: any, index: number) => ({
+        ...prof,
+        id: `prof-${index}-${Date.now()}`,
+        matchReason: prof.matchReason || "Matched based on research keywords.",
+        researchInterests: Array.isArray(prof.researchInterests) ? prof.researchInterests : [],
+      }));
+    } catch (parseError) {
+      console.error("JSON Parse Error:", parseError);
+      console.log("Raw Text:", text);
+      throw new Error("Failed to parse professor data from AI response.");
     }
   } catch (error) {
     console.error("Gemini API Error:", error);
